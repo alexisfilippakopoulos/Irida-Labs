@@ -88,6 +88,7 @@ class Client:
         elif header == 'INITIAL_WEIGHTS':
             self.client_model.load_state_dict(data[header][0])
             self.classifier_model.load_state_dict(data[header][1]) 
+            self.client_model.to(self.device), self.classifier_model.to(self.device)
             print('[+] Loaded initial weights successfully')
             self.send_packet(data={'OK': b''})
         self.event_dict[header].set()
