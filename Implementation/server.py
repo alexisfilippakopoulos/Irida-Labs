@@ -14,8 +14,11 @@ label_lock = threading.Lock()
 client_recvd_event = threading.Event()
 
 # Constants
-MIN_PARTICIPANTS = 2
+MIN_PARTICIPANTS_START = 2
 GLOBAL_EPOCHS = 10
+MIN_PARTICIPANTS_FIT = 2
+
+LABELING_CLIENT = -1
 
 class Server:
     def __init__(self, server_ip, server_port):
@@ -35,6 +38,7 @@ class Server:
         self.client_model = ClientModel()
         torch.manual_seed(32)
         self.classifier_model = ClientClassifier()
+        self.recvd_initial_weights = 0
 
     def create_db_schema(self):
         """
@@ -127,8 +131,6 @@ class Server:
             client_socket: socket used from a particular client to establish communication.
         """
         data_packet = b''
-        # Thread is daemon so that if the socket closes the child thread also dies
-        #threading.Thread(target=self.give_labels, args=(client_id, client_socket), daemon=True).start()
         try:
             while True:
                 data_chunk = client_socket.recv(4096)
@@ -139,13 +141,17 @@ class Server:
                 if not data_chunk:
                     break
         except socket.error as error:
+            # Handle client dropout
+            global LABELING_CLIENT
             print(f'Error receiving data from {client_id, self.connected_clients[client_id][0]}:\n{error}')
             client_socket.close()
             self.connected_clients.pop(client_id)
+            features_recvd_event.set() if LABELING_CLIENT == client_id else None
+            self.labeled_clients.remove(client_id) if client_id in self.labeled_clients else None
     
     def handle_connections(self, client_address: tuple, client_socket: socket.socket):
         """
-        When a client connects -> Add him on db if nonexistent, append to connected_clients list and trasmit initial weights
+        When a client connects -> Add him on db if nonexistent, append to connected_clients list and transmit initial weights
         Args: Tuple (client_ip, client_port)
         """
         client_ip, client_port = client_address
@@ -176,6 +182,7 @@ class Server:
     def send_packet(self, data: dict, client_socket: socket.socket):
         """
         Packs and sends a payload of data to a specified client.
+        The format used is <START>DATA<END>, where DATA is a dictionary whose key is the header and whose value is the payload.
         Args:
             data: payload of data to be sent.
             client_socket: socket used for the communication with a specific client.
@@ -188,8 +195,16 @@ class Server:
 
     def handle_data(self, data: dict, client_id: int):
         """
-        
+        Handles a received data packet according to its contents.
+        A packet can be either be:
+            1. Model Outputs during labeling process
+            2. Updated model weights during training
+            3. Signal that initial weights are received
+        Args:
+            data: Dictionary where the key is the header and the value is the payload
+            client_id: The id of the sending client
         """
+        # Get payload and header
         data = pickle.loads(data.split(b'<START>')[1].split(b'<END>')[0])
         header = list(data.keys())[0]
         if (header.__contains__('model_outputs')):
@@ -211,7 +226,7 @@ class Server:
             self.trained_clients.append(client_id)
             print(f"[+] Received updated weights of client: {client_id, self.connected_clients[client_id][0]}")
         elif header == 'OK':
-            pass
+            self.recvd_initial_weights += 1
         self.event_dict[header].set() if header in self.event_dict.keys() else None
 
 
@@ -232,27 +247,42 @@ class Server:
             client_id: The client identifier
             client_socket: The client's socket
         """
-        print(client_recvd_event.is_set())
         with label_lock:
-            client_recvd_event.wait()
-            client_recvd_event.clear()
+            # Ensure that client has received weights
+            global LABELING_CLIENT
+            LABELING_CLIENT = client_id
+            while not self.recvd_initial_weights > 0:
+                pass
+            self.recvd_initial_weights -= 1
+
             print(f'[+] Labeling with client {client_id, self.connected_clients[client_id][0]}')
             self.send_packet(data={'LABEL_EVENT': b''}, client_socket=client_socket)
             with torch.inference_mode():
                 while True:
+                    # Ensure client's features are stored on the db
                     features_recvd_event.wait()
                     features_recvd_event.clear()
                     query = 'SELECT model_outputs FROM training WHERE client_id = ?'
                     client_features = pickle.loads(self.execute_query(query=query, values=(client_id, ), fetch_data_flag=True))
                     client_features.to(self.device)
                     server_outputs = self.server_model(client_features)
-                    _, preds = torch.max(server_outputs, 1) 
-                    self.send_packet(data={'LABELS': preds}, client_socket=self.connected_clients[client_id][1])
+                    _, preds = torch.max(server_outputs, 1)
+                    # Handle client that disconnected during labeling
+                    try: 
+                        self.send_packet(data={'LABELS': preds}, client_socket=self.connected_clients[client_id][1])
+                    except KeyError as error:
+                        break
+                    # If this is the last batch if the client's data
                     if labeling_finished.is_set():
                         labeling_finished.clear()
                         break
+        # Handle client that disconnected during labeling
+        try:
             print(f'[+] Finished labeling with client {client_id, self.connected_clients[client_id][0]}')
             self.labeled_clients.append(client_id)
+        except KeyError as error:
+            print('[+] Client Disconnected.')
+
 
     def aggregate_global_model(self):
         pass
@@ -311,7 +341,7 @@ if __name__ == '__main__':
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
     #server.initialize_models()
-    while (len(server.connected_clients) < MIN_PARTICIPANTS) or len(server.connected_clients) != len(server.labeled_clients):
+    while (len(server.connected_clients) < MIN_PARTICIPANTS_START) or (len(server.connected_clients) < len(server.labeled_clients)):
         pass
 
     for e in range(GLOBAL_EPOCHS):
@@ -319,7 +349,7 @@ if __name__ == '__main__':
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
         #receive updates from min_clients
-        while len(server.trained_clients) != MIN_PARTICIPANTS:
+        while len(server.trained_clients) < MIN_PARTICIPANTS_FIT:
             pass
         server.trained_clients.clear()
         #aggregate global model

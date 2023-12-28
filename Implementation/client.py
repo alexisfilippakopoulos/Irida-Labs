@@ -149,8 +149,8 @@ class Client:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
                 self.true_labs.append(labels)
                 split_features_maps = self.client_model(inputs)
-                #if i == len(train_dl) - 1:
-                if i == 1:
+                if i == len(train_dl) - 1:
+                #if i == 1:
                     self.send_packet(data={'final_model_outputs': split_features_maps})
                     labels_recvd_event.wait()
                     break
