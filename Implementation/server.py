@@ -25,11 +25,12 @@ class Server:
         self.ip = server_ip
         self.port = int(server_port)
         self.server_db = 'Implementation/server_data/server_db.db'
-        torch.manual_seed(32)
-        self.server_model = ServerModel()
         self.event_dict = {'model_outputs': features_recvd_event, 'OK': client_recvd_event, 'final_model_outputs': labeling_finished}
         self.device = self.get_device()
         print(f'Using {self.device}')
+        torch.manual_seed(32)
+        self.server_model = ServerModel()
+        self.server_model.to(device=self.device)
         torch.manual_seed(32)
         self.client_model = ClientModel()
         torch.manual_seed(32)
@@ -54,8 +55,8 @@ class Server:
         FOREIGN KEY (client_id) REFERENCES clients (id)
         )
         """
-        self.execute_query(query=clients_table) if self.check_table_existence(clients_table) else None
-        self.execute_query(query=training_table) if self.check_table_existence(training_table) else None
+        self.execute_query(query=clients_table) if not self.check_table_existence(target_table='clients') else None
+        self.execute_query(query=training_table) if not self.check_table_existence(target_table='training') else None
         print('[+] Database schema created/loaded successsfully')
 
     def check_table_existence(self, target_table: str):
@@ -114,7 +115,7 @@ class Server:
             while True:
                 client_socket, client_address = self.server_socket.accept()
                 client_id = self.handle_connections(client_address, client_socket)
-                threading.Thread(target=server.listen_for_messages, args=(client_socket, client_id)).start()
+                threading.Thread(target=self.listen_for_messages, args=(client_socket, client_id)).start()
                 threading.Thread(target=self.give_labels, args=(client_id, client_socket)).start()
         except socket.error as error:
             print(f'Connection handling thread failed:\n{error}')
@@ -126,6 +127,8 @@ class Server:
             client_socket: socket used from a particular client to establish communication.
         """
         data_packet = b''
+        # Thread is daemon so that if the socket closes the child thread also dies
+        #threading.Thread(target=self.give_labels, args=(client_id, client_socket), daemon=True).start()
         try:
             while True:
                 data_chunk = client_socket.recv(4096)
@@ -166,7 +169,7 @@ class Server:
             client_id = exists[0][0]
         self.connected_clients[client_id] = (client_address, client_socket)
         print(f'[+] Client {client_id, client_address} connected -> Connected clients: {len(self.connected_clients)}')
-        server.send_packet(data={'INITIAL_WEIGHTS': [server.client_model.state_dict(), server.classifier_model.state_dict()]}, client_socket=client_socket)
+        self.send_packet(data={'INITIAL_WEIGHTS': [self.client_model.state_dict(), self.classifier_model.state_dict()]}, client_socket=client_socket)
         print(f'[+] Transmitted initial weights to client {client_id, client_address}')
         return client_id
 
@@ -181,6 +184,7 @@ class Server:
             client_socket.sendall(b'<START>' + pickle.dumps(data) + b'<END>')
         except socket.error as error:
             print(f'Message sending failed with error:\n{error}')
+            client_socket.close()
 
     def handle_data(self, data: dict, client_id: int):
         """
@@ -228,17 +232,19 @@ class Server:
             client_id: The client identifier
             client_socket: The client's socket
         """
+        print(client_recvd_event.is_set())
         with label_lock:
             client_recvd_event.wait()
             client_recvd_event.clear()
             print(f'[+] Labeling with client {client_id, self.connected_clients[client_id][0]}')
-            server.send_packet(data={'LABEL_EVENT': b''}, client_socket=client_socket)
+            self.send_packet(data={'LABEL_EVENT': b''}, client_socket=client_socket)
             with torch.inference_mode():
                 while True:
                     features_recvd_event.wait()
                     features_recvd_event.clear()
                     query = 'SELECT model_outputs FROM training WHERE client_id = ?'
                     client_features = pickle.loads(self.execute_query(query=query, values=(client_id, ), fetch_data_flag=True))
+                    client_features.to(self.device)
                     server_outputs = self.server_model(client_features)
                     _, preds = torch.max(server_outputs, 1) 
                     self.send_packet(data={'LABELS': preds}, client_socket=self.connected_clients[client_id][1])
