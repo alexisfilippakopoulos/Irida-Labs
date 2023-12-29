@@ -5,6 +5,8 @@ import sys
 import torch.nn as nn
 import sqlite3
 import torch
+from FL_stategy import FL_Strategy, FL_Plan
+
 
 # Events to ensure synchronization
 features_recvd_event = threading.Event()
@@ -232,6 +234,11 @@ class Server:
 
     def initialize_models(self):
         pass
+
+    def initialize_strategy(self, config_file: str):
+        self.strategy = FL_Strategy(config_file=config_file)
+        self.plan = FL_Plan(fl_strategy_instance=self.strategy)
+        print(f"[+] Emloyed Strategy:\n{self.strategy}")
         
     def get_device(self):
         """
@@ -340,6 +347,7 @@ if __name__ == '__main__':
     server.create_socket()
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
+    server.initialize_strategy(config_file='Implementation/stategy_config.txt')
     #server.initialize_models()
     while (len(server.connected_clients) < MIN_PARTICIPANTS_START) or (len(server.connected_clients) < len(server.labeled_clients)):
         pass
