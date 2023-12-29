@@ -5,7 +5,10 @@ import sys
 import torch.nn as nn
 import sqlite3
 import torch
-from FL_stategy import FL_Strategy, FL_Plan
+from fl_strategy import FL_Strategy
+from fl_plan import FL_Plan
+from client_models import ClientModel, ClientClassifier
+from server_model import ServerModel
 
 
 # Events to ensure synchronization
@@ -16,10 +19,6 @@ label_lock = threading.Lock()
 client_recvd_event = threading.Event()
 
 # Constants
-MIN_PARTICIPANTS_START = 2
-GLOBAL_EPOCHS = 10
-MIN_PARTICIPANTS_FIT = 2
-
 LABELING_CLIENT = -1
 
 class Server:
@@ -177,7 +176,8 @@ class Server:
             client_id = exists[0][0]
         self.connected_clients[client_id] = (client_address, client_socket)
         print(f'[+] Client {client_id, client_address} connected -> Connected clients: {len(self.connected_clients)}')
-        self.send_packet(data={'INITIAL_WEIGHTS': [self.client_model.state_dict(), self.classifier_model.state_dict()]}, client_socket=client_socket)
+        #self.send_packet(data={'INITIAL_WEIGHTS': [self.client_model.state_dict(), self.classifier_model.state_dict()]}, client_socket=client_socket)
+        self.send_packet(data={'PLAN': self.plan}, client_socket=client_socket)
         print(f'[+] Transmitted initial weights to client {client_id, client_address}')
         return client_id
 
@@ -237,7 +237,9 @@ class Server:
 
     def initialize_strategy(self, config_file: str):
         self.strategy = FL_Strategy(config_file=config_file)
-        self.plan = FL_Plan(fl_strategy_instance=self.strategy)
+        self.plan = FL_Plan(epochs=self.strategy.GLOBAL_TRAINING_ROUNDS, lr=self.strategy.LEARNING_RATE,
+                            loss=self.strategy.CRITERION, optimizer=self.strategy.OPTIMIZER, batch_size=self.strategy.BATCH_SIZE,
+                            model_weights=self.client_model.state_dict(), classifier_weights=self.classifier_model.state_dict())
         print(f"[+] Emloyed Strategy:\n{self.strategy}")
         
     def get_device(self):
@@ -294,48 +296,6 @@ class Server:
     def aggregate_global_model(self):
         pass
 
-class ClientModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3)
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=3)
-        self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(kernel_size=2)
-        
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = self.relu(self.conv3(x))
-        x = self.pool(self.relu(self.conv4(x)))
-        return x
-
-class ClientClassifier(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(in_features=4*4*256, out_features=10)
-        
-    def forward(self, x):
-        x = self.fc1(torch.flatten(x, 1))
-        return x
-
-class ServerModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv5 = nn.Conv2d(256, 512, kernel_size=3)
-        self.fc1 = nn.Linear(2*2*512, 256)
-        self.fc2 = nn.Linear(256, 128)
-        self.fc3 = nn.Linear(128, 10)
-        self.relu = nn.ReLU(inplace=True)
-        
-    def forward(self, x):
-        x = self.relu(self.conv5(x))
-        x = self.fc1(torch.flatten(x, 1))
-        x = self.fc2(x)
-        x = self.fc3(x)
-        return x
-
 
 if __name__ == '__main__':
 # To execute, server_ip and server_port must be specified from the cl.
@@ -348,16 +308,15 @@ if __name__ == '__main__':
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
     server.initialize_strategy(config_file='Implementation/stategy_config.txt')
-    #server.initialize_models()
-    while (len(server.connected_clients) < MIN_PARTICIPANTS_START) or (len(server.connected_clients) < len(server.labeled_clients)):
+    while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) < len(server.labeled_clients)):
         pass
 
-    for e in range(GLOBAL_EPOCHS):
+    for e in range(server.strategy.GLOBAL_TRAINING_ROUNDS):
         #transmit train signal to each client
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
         #receive updates from min_clients
-        while len(server.trained_clients) < MIN_PARTICIPANTS_FIT:
+        while len(server.trained_clients) < server.strategy.MIN_PARTICIPANTS_FIT:
             pass
         server.trained_clients.clear()
         #aggregate global model

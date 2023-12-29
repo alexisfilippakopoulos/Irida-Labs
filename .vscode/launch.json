@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Current File",
+            "name": "Server Debugger",
             "type": "python",
             "request": "launch",
-            "program": "Implementation/server.py",
+            "program": "Implementation/server/server.py",
             "args": ["127.0.0.1", "8080"],
             "console": "integratedTerminal",
             "justMyCode": true
