@@ -16,6 +16,7 @@ start_label_event = threading.Event()
 labels_recvd_event = threading.Event()
 fl_plan_event = threading.Event()
 start_training_event = threading.Event()
+aggr_recvd_event = threading.Event()
 
 #Constants
 VALIDATION_SPLIT = 0.2
@@ -30,13 +31,13 @@ class Client:
         self.classifier_model = ClientClassifier()
         self.server_labels = []
         self.true_labs = []
-        self.event_dict = {'LABELS': labels_recvd_event, 'LABEL_EVENT': start_label_event, 'PLAN': fl_plan_event, 'TRAIN': start_training_event}
+        self.event_dict = {'LABELS': labels_recvd_event, 'LABEL_EVENT': start_label_event, 'PLAN': fl_plan_event, 'TRAIN': start_training_event, 'AGGR_MODELS': aggr_recvd_event}
         self.device = self.get_device()
         print(f'Using {self.device}')
 
     def create_socket(self):
         """
-        Binds the client-side socket to enable communication and connects with the server-side socket
+        Binds the client-side socketOK to enable communication and connects with the server-side socket
         to establish communication.
         """
         try:
@@ -89,6 +90,10 @@ class Client:
             self.fl_plan = data[header]
             self.handle_fl_plan()
             self.send_packet(data={'OK': b''})
+        elif header == 'AGGR_MODELS':
+            self.client_model.load_state_dict(data[header][0])
+            self.classifier_model.load_state_dict(data[header][1])
+            print("[+] Received and loaded aggregated weights")
         self.event_dict[header].set()
 
     def handle_fl_plan(self):
@@ -172,7 +177,7 @@ class Client:
                 split_features_maps = self.client_model(inputs)
                 #if i == len(train_dl) - 1:
                 if i == 3:
-                    self.send_packet(data={'final_model_outputs': split_features_maps})
+                    self.send_packet(data={'final_model_outputs': [split_features_maps, len(train_dl)]})
                     labels_recvd_event.wait()
                     break
                 else:
@@ -231,6 +236,9 @@ if __name__ == '__main__':
     client.get_labels(train_dl=train_dl)
     end = time.time()
     print('Time to label: ', end - start)
+    print(len(train_dl))
+    print(len(training_data))
+    print(len(train_dl) * client.fl_plan.BATCH_SIZE)
     # Custom dataset with server preds
     """training_data = CustomDataset(training_data, client.server_labels)
     train_dl = client.get_dataloader(data=training_data, batch_size=BATCH_SIZE, shuffle=True)
@@ -246,6 +254,11 @@ if __name__ == '__main__':
         client.validate(val_dl=val_dl)
         client.send_packet(data={'UPDATED_WEIGHTS': [client.client_model.state_dict(), client.classifier_model.state_dict()]})
         print(f'[+] Waiting for aggregated global model')
+        aggr_recvd_event.wait()
+        aggr_recvd_event.clear()
+
+
+
 
     
 

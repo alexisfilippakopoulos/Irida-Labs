@@ -32,11 +32,11 @@ class FL_Strategy:
                     if line.__contains__('#'):
                         continue
                     elif not line.__contains__('='):
-                        raise Exception(f"Invalid configuration line (missing '=') at\nLine {i+ 1}: {line}")
+                        raise Exception(f"Invalid configuration line (missing '=') at\nLine {i + 1}: {line}")
                     else:
                         args = line.strip().lower().split('=')
                         if '' in args:
-                            raise Exception(f"Invalid configuration line (missing key or value) at\nLine {i+ 1}: {line}")
+                            raise Exception(f"Invalid configuration line (missing key or value) at\nLine {i + 1}: {line}")
                         arg = self.decode_args(args)
                         attrs.append(arg)
             return attrs

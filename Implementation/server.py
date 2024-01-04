@@ -9,6 +9,7 @@ from fl_strategy import FL_Strategy
 from fl_plan import FL_Plan
 from client_models import ClientModel, ClientClassifier
 from server_model import ServerModel
+import time
 
 
 # Events to ensure synchronization
@@ -56,7 +57,9 @@ class Server:
         CREATE TABLE training(
         client_id INT PRIMARY KEY,
         model_outputs BLOB,
-        updated_weights BLOB,
+        model_updated_weights BLOB,
+        classifier_updated_weights BLOB,
+        data_size INT,
         FOREIGN KEY (client_id) REFERENCES clients (id)
         )
         """
@@ -79,7 +82,7 @@ class Server:
     
     def execute_query(self, query: str, values=None, fetch_data_flag=False, fetch_all_flag=False):
         """
-        Executes a given query. Either for retreival or update purposes.
+        Executes a given query. Either for retrieval or update purposes.
         Args:
             query: Query to be executed
             values: Query values
@@ -209,22 +212,33 @@ class Server:
         # Get payload and header
         data = pickle.loads(data.split(b'<START>')[1].split(b'<END>')[0])
         header = list(data.keys())[0]
-        if (header.__contains__('model_outputs')):
-            query = f"""
-            INSERT INTO training (client_id, model_outputs) VALUES (?, ?)
-            ON CONFLICT (client_id) DO
-            UPDATE SET model_outputs = ?
-            """
-            serialized_data = pickle.dumps(data[header])
-            self.execute_query(query=query, values=(client_id, serialized_data, serialized_data))
+        if header.__contains__('model_outputs'):
+            if header == 'model_outputs':
+                query = f"""
+                INSERT INTO training (client_id, model_outputs) VALUES (?, ?)
+                ON CONFLICT (client_id) DO
+                UPDATE SET model_outputs = ?
+                """
+                serialized_data = pickle.dumps(data[header])
+                self.execute_query(query=query, values=(client_id, serialized_data, serialized_data))
+            else:
+                query = f"""
+                INSERT INTO training (client_id, model_outputs, data_size) VALUES (?, ?, ?)
+                ON CONFLICT (client_id) DO
+                UPDATE SET model_outputs = ?, data_size = ?
+                """
+                serialized_outputs = pickle.dumps(data[header][0])
+                data_size = data[header][1] * self.strategy.BATCH_SIZE
+                self.execute_query(query=query, values=(client_id, serialized_outputs, data_size, serialized_outputs, data_size))
             self.event_dict['model_outputs'].set() if header == 'final_model_outputs' else None
         elif header == 'UPDATED_WEIGHTS':
             query = """
-            INSERT INTO training (client_id, model_outputs) VALUES (?, ?)
+            INSERT INTO training (client_id, model_updated_weights, classifier_updated_weights) VALUES (?, ?, ?)
             ON CONFLICT (client_id) DO
-            UPDATE SET updated_weights = ? """
-            serialized_data = pickle.dumps(data[header])
-            self.execute_query(query=query, values=(client_id, serialized_data, serialized_data))
+            UPDATE SET model_updated_weights = ?, classifier_updated_weights = ? """
+            serialized_model_weights = pickle.dumps(data[header][0])
+            serialized_classifier_weights = pickle.dumps(data[header][1])
+            self.execute_query(query=query, values=(client_id, serialized_model_weights, serialized_classifier_weights, serialized_model_weights, serialized_classifier_weights))
             self.trained_clients.append(client_id)
             print(f"[+] Received updated weights of client: {client_id, self.connected_clients[client_id][0]}")
         elif header == 'OK':
@@ -294,8 +308,31 @@ class Server:
 
 
     def aggregate_global_model(self):
-        pass
+        # Fetch the updated model weights of all trained clients
+        query = "SELECT model_updated_weights FROM training WHERE client_id IN (" + ", ".join(str(id) for id in self.trained_clients) + ")"
+        all_client_model_weights = self.execute_query(query=query, fetch_data_flag=True, fetch_all_flag=True)
+        # Fetch the updated classifier weights of all trained clients
+        query = "SELECT classifier_updated_weights FROM training WHERE client_id IN (" + ", ".join(str(id) for id in self.trained_clients) + ")"
+        all_client_classifier_weights = self.execute_query(query=query, fetch_data_flag=True, fetch_all_flag=True)
+        # Fetch the datasizes of all trained clients
+        query = "SELECT data_size FROM training WHERE client_id IN (" + ", ".join(str(id) for id in self.trained_clients) + ")"
+        datasizes = self.execute_query(query=query, fetch_data_flag=True, fetch_all_flag=True)
+        datasizes = [int(row[0]) for row in datasizes]
+        #avg_model_weights = self.calculate_weighted_avg(all_client_model_weights)
+        #avg_classifier_weights = self.calculate_weighted_avg(all_client_classifier_weights)
+        return [self.calculate_weighted_avg(all_client_model_weights, datasizes), self.calculate_weighted_avg(all_client_classifier_weights, datasizes)]
 
+    def calculate_weighted_avg(self, fetched_weights: list, fetched_datasizes: list):
+        avg_weights = {}
+        total_data = sum(datasize for datasize in fetched_datasizes)
+        for i in range(len(fetched_weights)):
+            weight_dict = pickle.loads(fetched_weights[i][0])
+            for key in weight_dict:
+                if key in avg_weights.keys():
+                    avg_weights[key] += avg_weights[key] * (fetched_datasizes[i] / total_data)
+                else:
+                    avg_weights[key] = weight_dict[key] * (fetched_datasizes[i] / total_data)
+        return avg_weights
 
 if __name__ == '__main__':
 # To execute, server_ip and server_port must be specified from the cl.
@@ -308,7 +345,8 @@ if __name__ == '__main__':
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
     server.initialize_strategy(config_file='Implementation/stategy_config.txt')
-    while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) < len(server.labeled_clients)):
+
+    while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
         pass
 
     for e in range(server.strategy.GLOBAL_TRAINING_ROUNDS):
@@ -318,10 +356,14 @@ if __name__ == '__main__':
         #receive updates from min_clients
         while len(server.trained_clients) < server.strategy.MIN_PARTICIPANTS_FIT:
             pass
-        server.trained_clients.clear()
         #aggregate global model
+        aggr_models = server.aggregate_global_model()
         #save it o db
         #transmit global model
+        for client_id, (client_address, client_socket) in server.connected_clients.items():
+            server.send_packet(data={'AGGR_MODELS': aggr_models}, client_socket=client_socket)
+        server.trained_clients.clear()
+        time.sleep(5)
 
     
 
