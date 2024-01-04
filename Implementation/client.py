@@ -37,13 +37,13 @@ class Client:
 
     def create_socket(self):
         """
-        Binds the client-side socketOK to enable communication and connects with the server-side socket
+        Binds the client-side socket to enable communication and connects with the server-side socket
         to establish communication.
         """
         try:
             self.server_socket = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-            self.server_socket.bind((self.server_ip, self.client_port))
-            self.server_socket.connect((self.client_ip, self.server_port))
+            self.server_socket.bind((self.client_ip, self.client_port))
+            self.server_socket.connect((self.server_ip, self.server_port))
             print(f'[+] Connected successfully with server at ({self.server_ip}, {self.server_port})')
         except socket.error as error:
             print(f'Socket initialization failed with error:\n{error}')
@@ -128,6 +128,7 @@ class Client:
             train_subset: Training dataset
             test_subset: Testing dataset
         """
+        #shards = {'0': [0, 1, 5, 6], '1': [2, 3, 4, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         shards = {'0': [0, 1], '1': [2, 3], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         training_indices = []
         testing_indices = []
@@ -230,15 +231,17 @@ if __name__ == '__main__':
     client.create_socket()
     threading.Thread(target=client.listen_for_messages).start()
     training_data, testing_data = client.get_dataset(shard_id=sys.argv[5])
+    fl_plan_event.wait()
+    fl_plan_event.clear()
     train_dl, val_dl = client.get_dataloader(data=training_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False, split_flag=True)
     test_dl =  client.get_dataloader(data=testing_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False)
     start = time.time()
     client.get_labels(train_dl=train_dl)
     end = time.time()
-    print('Time to label: ', end - start)
-    print(len(train_dl))
-    print(len(training_data))
-    print(len(train_dl) * client.fl_plan.BATCH_SIZE)
+    #print('Time to label: ', end - start)
+    #print(len(train_dl))
+    #print(len(training_data))
+    #print(len(train_dl) * client.fl_plan.BATCH_SIZE)
     # Custom dataset with server preds
     """training_data = CustomDataset(training_data, client.server_labels)
     train_dl = client.get_dataloader(data=training_data, batch_size=BATCH_SIZE, shuffle=True)

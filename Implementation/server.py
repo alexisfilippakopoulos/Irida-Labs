@@ -77,7 +77,7 @@ class Server:
         """
         query = "SELECT name FROM sqlite_master WHERE type ='table'"
         tables = self.execute_query(query=query, values=None, fetch_data_flag=True, fetch_all_flag=True)
-        exists = any(table[0] == target_table for table in tables)
+        exists = any(table[0] == target_table for table in tables) if tables is not None else False
         return exists
     
     def execute_query(self, query: str, values=None, fetch_data_flag=False, fetch_all_flag=False):
@@ -344,7 +344,7 @@ if __name__ == '__main__':
     server.create_socket()
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
-    server.initialize_strategy(config_file='Implementation/stategy_config.txt')
+    server.initialize_strategy(config_file='Implementation/strategy_config.txt')
 
     while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
         pass
