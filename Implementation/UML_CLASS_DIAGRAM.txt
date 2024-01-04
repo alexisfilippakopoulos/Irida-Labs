@@ -1,0 +1,135 @@
+@startuml
+class Server {
+    create_db_schema()
+    check_table_existence()
+    execute_query()
+    create_socket()
+    listen_for_connections()
+    listen_for_messages()
+    handle_connections()
+    send_packet()
+    handle_data()
+    initialize_models()
+    initialize_strategy()
+    get_device()
+    give_labels()
+    aggregate_global_model()
+        ip: str
+    port: int
+    device: torch.device
+    server_model: torch.nn.Module
+    client_model: torch.nn.Module
+    classifier_model: torch.nn.Module
+    recvd_initial_weights: int
+    server_socket: socket.socket
+    strategy: FL_Strategy
+    plan: FL_Plan
+    connected_clients: dict
+    trained_clients: list
+    labeled_clients: list
+    server_db: str
+    __init__()
+}
+
+class ServerModel {
+    forward()
+        conv5: torch.nn.Conv2d
+    fc1: torch.nn.Linear
+    fc2: torch.nn.Linear
+    fc3: torch.nn.Linear
+    relu: torch.nn.ReLU
+    __init__()
+}
+
+class FL_Strategy {
+    read_conf_file()
+    decode_args()
+    __repr__()
+        MIN_PARTICIPANTS_START: int
+    MIN_PARTICIPANTS_FIT: int
+    GLOBAL_TRAINING_ROUNDS: int
+    BATCH_SIZE: int
+    LEARNING_RATE: float
+    CRITERION: str
+    OPTIMIZER: str
+    __init__()
+}
+
+class FL_Plan {
+    __repr__()
+        GLOBAL_TRAINING_ROUNDS: int
+    LEARNING_RATE: float
+    CRITERION: str
+    OPTIMIZER: str
+    BATCH_SIZE: int
+    model_weights: collections.OrderedDict
+    classifier_weights: collections.OrderedDict
+    __init__()
+}
+
+class Client {
+    create_socket()
+    listen_for_messages()
+    send_packet()
+    handle_packets()
+    handle_fl_plan()
+    get_dataset()
+    get_dataloader()
+    get_device()
+    get_labels()
+    train_one_epoch()
+    validate()
+        server_ip: str
+    server_port: int
+    client_ip: str
+    client_port: int
+    client_model: torch.nn.Module
+    classifier_model: torch.nn.Module
+    device: torch.device
+    server_socket: socket.socket
+    fl_plan: FL_Plan
+    criterion: torch.nn
+    model_optimizer: torch.optimizer
+    classifier_optimizer: torch.optimizer
+    server_labels: list
+    true_labs: list
+    event_dict: dict
+    __init__()
+}
+
+class CustomDataset {
+    __len__()
+    __getitem__()
+        data: list
+    labels: list
+    __init__()
+}
+
+class ClientModel {
+    forward()
+        conv1: torch.nn.Conv2d
+    conv2: torch.nn.Conv2d
+    conv3: torch.nn.Conv2d
+    conv4: torch.nn.Conv2d
+    relu: torch.nn.ReLU
+    pool: torch.nn.MaxPool2d
+    __init__()
+}
+class ClientClassifier {
+    forward()
+        fc1: torch.nn.Linear
+    __init__()
+}
+
+Server "1" -- "1" FL_Strategy: has
+Server "1" -- "1" ServerModel: has
+Server "1" -- "1" FL_Plan: has
+Client "1" -- "1" ClientModel: has
+Client "1" -- "1" ClientClassifier: has
+Client "1" -- "1" FL_Plan: has
+Client "1" -- "1" CustomDataset: has
+torch.utils.data.Dataset <|-- CustomDataset
+ClientModel --|> torch.nn.Module
+ClientClassifier --|> torch.nn.Module
+ServerModel --|> torch.nn.Module
+@enduml

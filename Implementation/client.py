@@ -4,20 +4,21 @@ import pickle
 import sys
 import torch.nn as nn
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 import torch
 import time
+from fl_plan import FL_Plan
+from client_models import ClientModel, ClientClassifier
+from custom_dataset import CustomDataset
 
 # Events to ensure synchronization
 start_label_event = threading.Event()
 labels_recvd_event = threading.Event()
-initial_weights_event = threading.Event()
+fl_plan_event = threading.Event()
 start_training_event = threading.Event()
+aggr_recvd_event = threading.Event()
 
 #Constants
-BATCH_SIZE = 64
-LEARNING_RATE = 1e-2
-GLOBAL_EPOCHS = 10
 VALIDATION_SPLIT = 0.2
 
 class Client:
@@ -29,12 +30,9 @@ class Client:
         self.client_model = ClientModel()
         self.classifier_model = ClientClassifier()
         self.server_labels = []
-        self.event_dict = {'LABELS': labels_recvd_event, 'LABEL_EVENT': start_label_event, 'INITIAL_WEIGHTS': initial_weights_event, 'TRAIN': start_training_event}
-        self.device = self.get_device()
-        self.criterion = nn.CrossEntropyLoss()
-        self.model_optimizer = torch.optim.SGD(params=self.client_model.parameters(), lr=LEARNING_RATE)
         self.true_labs = []
-        self.classifier_optimizer = torch.optim.SGD(params=self.classifier_model.parameters(), lr=LEARNING_RATE)
+        self.event_dict = {'LABELS': labels_recvd_event, 'LABEL_EVENT': start_label_event, 'PLAN': fl_plan_event, 'TRAIN': start_training_event, 'AGGR_MODELS': aggr_recvd_event}
+        self.device = self.get_device()
         print(f'Using {self.device}')
 
     def create_socket(self):
@@ -44,8 +42,8 @@ class Client:
         """
         try:
             self.server_socket = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-            self.server_socket.bind((self.server_ip, self.client_port))
-            self.server_socket.connect((self.client_ip, self.server_port))
+            self.server_socket.bind((self.client_ip, self.client_port))
+            self.server_socket.connect((self.server_ip, self.server_port))
             print(f'[+] Connected successfully with server at ({self.server_ip}, {self.server_port})')
         except socket.error as error:
             print(f'Socket initialization failed with error:\n{error}')
@@ -80,33 +78,64 @@ class Client:
             print(f'Message sending failed with error:\n{error}')
 
     def handle_packets(self, data_packet: bytes):
+        """
+        Handle each complete data packet that arrives and set the corresponding event 
+        """
         data = data_packet.split(b'<START>')[1].split(b'<END>')[0]
         data = pickle.loads(data)
         header = list(data.keys())[0]
         if header == 'LABELS':
             self.server_labels.append(data[header])
-        elif header == 'INITIAL_WEIGHTS':
-            self.client_model.load_state_dict(data[header][0])
-            self.classifier_model.load_state_dict(data[header][1]) 
-            self.client_model.to(self.device), self.classifier_model.to(self.device)
-            print('[+] Loaded initial weights successfully')
+        elif header == 'PLAN':
+            self.fl_plan = data[header]
+            self.handle_fl_plan()
             self.send_packet(data={'OK': b''})
+        elif header == 'AGGR_MODELS':
+            self.client_model.load_state_dict(data[header][0])
+            self.classifier_model.load_state_dict(data[header][1])
+            print("[+] Received and loaded aggregated weights")
         self.event_dict[header].set()
 
-    def get_dataset(self, shard_id):
+    def handle_fl_plan(self):
         """
-        Downloads FashionMNIST dataset. Creates a Subset of the data
+        Handle the FL plan.
+        Extract all information and set the appropriate client parameters.
+        """
+        str_args = {'optimizer': {'adam': torch.optim.Adam, 'sgd': torch.optim.SGD}, 'criterion': {'crossentropy': nn.CrossEntropyLoss}}
+        try:
+            if self.fl_plan.CRITERION in str_args['criterion']:
+                self.criterion = str_args['criterion'][self.fl_plan.CRITERION]()
+            else:
+                raise ValueError(f'Unsupported Loss Function: {self.fl_plan.CRITERION}')
+            if self.fl_plan.OPTIMIZER in str_args['optimizer']:
+                self.model_optimizer = str_args['optimizer'][self.fl_plan.OPTIMIZER](params=self.client_model.parameters(), lr=client.fl_plan.LEARNING_RATE)
+                self.classifier_optimizer = str_args['optimizer'][self.fl_plan.OPTIMIZER](params=self.classifier_model.parameters(), lr=client.fl_plan.LEARNING_RATE)
+            else:
+                raise ValueError(f'Unsupported Optimizer: {self.fl_plan.OPTIMIZER}')
+            self.client_model.load_state_dict(self.fl_plan.model_weights)
+            self.classifier_model.load_state_dict(self.fl_plan.classifier_weights)
+            print('[+] Loaded FL plan successfully')
+            print(self.fl_plan)
+        except ValueError as e:
+            print(e)
+        
+
+    def get_dataset(self, shard_id: int):
+        """
+        Downloads FashionMNIST dataset.
+        Shards the data according to the shard_id argument and allocates the specified subset of data.
         Returns:
             train_subset: Training dataset
             test_subset: Testing dataset
         """
+        #shards = {'0': [0, 1, 5, 6], '1': [2, 3, 4, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         shards = {'0': [0, 1], '1': [2, 3], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         training_indices = []
         testing_indices = []
 
         transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, ), (0.5, ), )])
-        training_data = datasets.FashionMNIST(download=True, root='/data', train=True, transform=transform)
-        testing_data = datasets.FashionMNIST(download=True, root='/data', train=False, transform=transform)
+        training_data = datasets.FashionMNIST(download=True, root='Implementation/data/', train=True, transform=transform)
+        testing_data = datasets.FashionMNIST(download=True, root='Implementation/data/', train=False, transform=transform)
         
         for i in range(len(training_data.targets)):
             if training_data.targets[i] in shards[shard_id]:
@@ -118,8 +147,6 @@ class Client:
 
         train_subset = Subset(dataset=training_data, indices=training_indices)
         test_subset = Subset(dataset=testing_data, indices=testing_indices)
-
-        print(f'Training: {len(train_subset)}, Testing: {len(test_subset)}')
         return train_subset, test_subset
     
     def get_dataloader(self, data: datasets, batch_size: int, shuffle: bool, split_flag: bool = False):
@@ -150,8 +177,8 @@ class Client:
                 self.true_labs.append(labels)
                 split_features_maps = self.client_model(inputs)
                 #if i == len(train_dl) - 1:
-                if i == 1:
-                    self.send_packet(data={'final_model_outputs': split_features_maps})
+                if i == 3:
+                    self.send_packet(data={'final_model_outputs': [split_features_maps, len(train_dl)]})
                     labels_recvd_event.wait()
                     break
                 else:
@@ -185,54 +212,13 @@ class Client:
             outputs = self.classifier_model(self.client_model(inputs))
             vloss = self.criterion(outputs, labels)
             curr_vloss += vloss.item()
-            _, preds = torch.max(outputs, dim=1)
+            _, preds = torch.max(outputs.detach(), dim=1)
             corr += (preds == labels).sum().item()
             total += labels.size(0)
         del inputs, labels, outputs
         avg_vloss = curr_vloss / len(val_dl)
         val_acc = corr / total
         print(f'\t[+] Average Validation Loss: {avg_vloss: .2f}\n\t[+] Average Validation Accuracy: {val_acc: .2%}')
-
-               
-
-class ClientModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3)
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=3)
-        self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(kernel_size=2)
-        
-    def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = self.relu(self.conv3(x))
-        x = self.pool(self.relu(self.conv4(x)))
-        return x
-
-class ClientClassifier(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(in_features=4*4*256, out_features=10)
-        
-    def forward(self, x):
-        x = self.fc1(torch.flatten(x, 1))
-        return x
-    
-class CustomDataset(Dataset):
-    def __init__(self, original_data, server_labels):
-        self.data = original_data
-        self.labels = server_labels
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, index):
-        img, _ = self.data[index]
-        label = self.labels[index]
-        return img, label
     
 
 if __name__ == '__main__':
@@ -245,20 +231,24 @@ if __name__ == '__main__':
     client.create_socket()
     threading.Thread(target=client.listen_for_messages).start()
     training_data, testing_data = client.get_dataset(shard_id=sys.argv[5])
-    train_dl, val_dl = client.get_dataloader(data=training_data, batch_size=BATCH_SIZE, shuffle=False, split_flag=True)
-    test_dl =  client.get_dataloader(data=testing_data, batch_size=BATCH_SIZE, shuffle=False)
-    
+    fl_plan_event.wait()
+    fl_plan_event.clear()
+    train_dl, val_dl = client.get_dataloader(data=training_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False, split_flag=True)
+    test_dl =  client.get_dataloader(data=testing_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False)
     start = time.time()
     client.get_labels(train_dl=train_dl)
     end = time.time()
-    print('Time to label: ', end - start)
+    #print('Time to label: ', end - start)
+    #print(len(train_dl))
+    #print(len(training_data))
+    #print(len(train_dl) * client.fl_plan.BATCH_SIZE)
     # Custom dataset with server preds
     """training_data = CustomDataset(training_data, client.server_labels)
     train_dl = client.get_dataloader(data=training_data, batch_size=BATCH_SIZE, shuffle=True)
     print('[+] Custom dataset successfully created')
     print(len(training_data))
     print(len(train_dl))"""
-    for e in range(GLOBAL_EPOCHS):
+    for e in range(client.fl_plan.GLOBAL_TRAINING_ROUNDS):
         print('[+] Waiting for training signal')
         start_training_event.wait()
         start_training_event.clear()
@@ -267,6 +257,11 @@ if __name__ == '__main__':
         client.validate(val_dl=val_dl)
         client.send_packet(data={'UPDATED_WEIGHTS': [client.client_model.state_dict(), client.classifier_model.state_dict()]})
         print(f'[+] Waiting for aggregated global model')
+        aggr_recvd_event.wait()
+        aggr_recvd_event.clear()
+
+
+
 
     
 
