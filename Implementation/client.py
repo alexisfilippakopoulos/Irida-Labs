@@ -23,6 +23,14 @@ aggr_recvd_event = threading.Event()
 #Constants
 VALIDATION_SPLIT = 0.2
 
+def tictoc(func):
+    def wrapper(self, *args, **kwargs):
+        start = time.time()
+        func_result = func(self, *args, **kwargs)
+        end = time.time()
+        return func_result, end - start
+    return wrapper
+
 class Client:
     def __init__(self, server_ip, server_port, client_ip, client_port):
         self.server_ip = server_ip
@@ -192,6 +200,7 @@ class Client:
         self.server_labels = torch.cat(tensors=self.server_labels, dim=0)
         self.true_labs = torch.cat(tensors=self.true_labs, dim=0)
 
+    @tictoc
     def train_one_epoch(self, train_dl: DataLoader):
         self.client_model.train(), self.classifier_model.train()
         curr_loss = 0.
@@ -206,6 +215,7 @@ class Client:
         print(f'\t[+] Average Training Loss: {(curr_loss / len(train_dl)): .2f}')
         return curr_loss / len(train_dl)
 
+    @tictoc
     def validate(self, val_dl: DataLoader):
         self.client_model.eval(), self.classifier_model.eval()
         curr_vloss = 0.
@@ -240,9 +250,7 @@ if __name__ == '__main__':
     fl_plan_event.clear()
     train_dl, val_dl = client.get_dataloader(data=training_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False, split_flag=True)
     test_dl = client.get_dataloader(data=testing_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False)
-    start = time.time()
     client.get_labels(train_dl=train_dl)
-    end = time.time()
     #print('Time to label: ', end - start)
     #print(len(train_dl))
     #print(len(training_data))
@@ -258,10 +266,10 @@ if __name__ == '__main__':
         start_training_event.wait()
         start_training_event.clear()
         print(f'[+] Started training for global epoch: {e}')
-        avg_train_loss = client.train_one_epoch(train_dl=train_dl)
-        avg_vloss, val_acc = client.validate(val_dl=val_dl)
+        avg_train_loss, train_time = client.train_one_epoch(train_dl=train_dl)
+        (avg_vloss, val_acc), val_time = client.validate(val_dl=val_dl)
         client.send_packet(data={'UPDATED_WEIGHTS': [client.client_model.state_dict(), client.classifier_model.state_dict()]})
-        client.epoch_stats_df.loc[len(client.epoch_stats_df)] = {'epoch': e + 1, 'train_loss': avg_train_loss, 'val_loss': avg_vloss, 'val_acc': val_acc}
+        client.epoch_stats_df.loc[len(client.epoch_stats_df)] = {'epoch': e + 1, 'train_loss': avg_train_loss, 'val_loss': avg_vloss, 'val_acc': val_acc, 'train_time': train_time, 'val_time': val_time}
         client.epoch_stats_df.to_csv(path_or_buf=f'client_{client.client_port}.csv')
         print(f'[+] Waiting for aggregated global model')
         aggr_recvd_event.wait()
