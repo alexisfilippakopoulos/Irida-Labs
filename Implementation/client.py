@@ -10,6 +10,8 @@ import time
 from fl_plan import FL_Plan
 from client_models import ClientModel, ClientClassifier
 from custom_dataset import CustomDataset
+import pandas as pd
+
 
 # Events to ensure synchronization
 start_label_event = threading.Event()
@@ -33,6 +35,7 @@ class Client:
         self.true_labs = []
         self.event_dict = {'LABELS': labels_recvd_event, 'LABEL_EVENT': start_label_event, 'PLAN': fl_plan_event, 'TRAIN': start_training_event, 'AGGR_MODELS': aggr_recvd_event}
         self.device = self.get_device()
+        self.epoch_stats_df = pd.DataFrame(columns=['epoch', 'train_loss', 'val_loss', 'val_acc', 'train_time', 'val_time'])
         print(f'Using {self.device}')
 
     def create_socket(self):
@@ -129,7 +132,7 @@ class Client:
             test_subset: Testing dataset
         """
         #shards = {'0': [0, 1, 5, 6], '1': [2, 3, 4, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
-        shards = {'0': [0, 1], '1': [2, 3], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
+        shards = {'0': [0, 1, 3, 6], '1': [2, 4, 5, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         training_indices = []
         testing_indices = []
 
@@ -201,6 +204,7 @@ class Client:
             curr_loss += loss.item()
             self.model_optimizer.step(), self.classifier_optimizer.step()
         print(f'\t[+] Average Training Loss: {(curr_loss / len(train_dl)): .2f}')
+        return curr_loss / len(train_dl)
 
     def validate(self, val_dl: DataLoader):
         self.client_model.eval(), self.classifier_model.eval()
@@ -219,6 +223,7 @@ class Client:
         avg_vloss = curr_vloss / len(val_dl)
         val_acc = corr / total
         print(f'\t[+] Average Validation Loss: {avg_vloss: .2f}\n\t[+] Average Validation Accuracy: {val_acc: .2%}')
+        return avg_vloss, val_acc
     
 
 if __name__ == '__main__':
@@ -234,7 +239,7 @@ if __name__ == '__main__':
     fl_plan_event.wait()
     fl_plan_event.clear()
     train_dl, val_dl = client.get_dataloader(data=training_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False, split_flag=True)
-    test_dl =  client.get_dataloader(data=testing_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False)
+    test_dl = client.get_dataloader(data=testing_data, batch_size=client.fl_plan.BATCH_SIZE, shuffle=False)
     start = time.time()
     client.get_labels(train_dl=train_dl)
     end = time.time()
@@ -253,9 +258,11 @@ if __name__ == '__main__':
         start_training_event.wait()
         start_training_event.clear()
         print(f'[+] Started training for global epoch: {e}')
-        client.train_one_epoch(train_dl=train_dl)
-        client.validate(val_dl=val_dl)
+        avg_train_loss = client.train_one_epoch(train_dl=train_dl)
+        avg_vloss, val_acc = client.validate(val_dl=val_dl)
         client.send_packet(data={'UPDATED_WEIGHTS': [client.client_model.state_dict(), client.classifier_model.state_dict()]})
+        client.epoch_stats_df.loc[len(client.epoch_stats_df)] = {'epoch': e + 1, 'train_loss': avg_train_loss, 'val_loss': avg_vloss, 'val_acc': val_acc}
+        client.epoch_stats_df.to_csv(path_or_buf=f'client_{client.client_port}.csv')
         print(f'[+] Waiting for aggregated global model')
         aggr_recvd_event.wait()
         aggr_recvd_event.clear()

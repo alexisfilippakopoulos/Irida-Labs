@@ -29,7 +29,7 @@ class Server:
         self.labeled_clients = []
         self.ip = server_ip
         self.port = int(server_port)
-        self.server_db = 'Implementation/server_data/server_db.db'
+        self.server_db_path = 'Implementation/server_data/server_db.db'
         self.event_dict = {'model_outputs': features_recvd_event, 'OK': client_recvd_event, 'final_model_outputs': labeling_finished}
         self.device = self.get_device()
         print(f'Using {self.device}')
@@ -48,23 +48,33 @@ class Server:
         """
         clients_table = """
         CREATE TABLE clients(
-        id INT PRIMARY KEY,
-        ip VARCHAR(50),
-        port INT    
+            id INT PRIMARY KEY,
+            ip VARCHAR(50),
+            port INT    
         )
         """
         training_table = """
         CREATE TABLE training(
-        client_id INT PRIMARY KEY,
-        model_outputs BLOB,
-        model_updated_weights BLOB,
-        classifier_updated_weights BLOB,
-        data_size INT,
-        FOREIGN KEY (client_id) REFERENCES clients (id)
+            client_id INT PRIMARY KEY,
+            model_outputs BLOB,
+            model_updated_weights BLOB,
+            classifier_updated_weights BLOB,
+            data_size INT,
+            FOREIGN KEY (client_id) REFERENCES clients (id)
+        )
+        """
+        epoch_stats_table = """
+        CREATE TABLE epoch_stats(
+            epoch INT PRIMARY KEY,
+            global_model BLOB,
+            global_classifier BLOB,
+            connected_clients INT,
+            trained_clients INT
         )
         """
         self.execute_query(query=clients_table) if not self.check_table_existence(target_table='clients') else None
         self.execute_query(query=training_table) if not self.check_table_existence(target_table='training') else None
+        self.execute_query(query=epoch_stats_table) if not self.check_table_existence(target_table='epoch_stats') else None
         print('[+] Database schema created/loaded successsfully')
 
     def check_table_existence(self, target_table: str):
@@ -92,7 +102,7 @@ class Server:
             The data fetched for a specified query. If it is not a retrieval query then None is returned. 
         """
         try:
-            connection = sqlite3.Connection(self.server_db)
+            connection = sqlite3.Connection(self.server_db_path)
             cursor = connection.cursor()
             cursor.execute(query, values) if values is not None else cursor.execute(query)
             fetched_data = (cursor.fetchall() if fetch_all_flag else cursor.fetchone()[0]) if fetch_data_flag else None
@@ -240,7 +250,7 @@ class Server:
             serialized_classifier_weights = pickle.dumps(data[header][1])
             self.execute_query(query=query, values=(client_id, serialized_model_weights, serialized_classifier_weights, serialized_model_weights, serialized_classifier_weights))
             self.trained_clients.append(client_id)
-            print(f"[+] Received updated weights of client: {client_id, self.connected_clients[client_id][0]}")
+            print(f"\t[+] Received updated weights of client: {client_id, self.connected_clients[client_id][0]}")
         elif header == 'OK':
             self.recvd_initial_weights += 1
         self.event_dict[header].set() if header in self.event_dict.keys() else None
@@ -249,8 +259,13 @@ class Server:
     def initialize_models(self):
         pass
 
-    def initialize_strategy(self, config_file: str):
-        self.strategy = FL_Strategy(config_file=config_file)
+    def initialize_strategy(self, config_file_path: str):
+        """
+        Initializes the FL Strategy and FL Plan objects based on the configuration file.
+        Args:
+            config_file_path: The path to the configuration file
+        """
+        self.strategy = FL_Strategy(config_file=config_file_path)
         self.plan = FL_Plan(epochs=self.strategy.GLOBAL_TRAINING_ROUNDS, lr=self.strategy.LEARNING_RATE,
                             loss=self.strategy.CRITERION, optimizer=self.strategy.OPTIMIZER, batch_size=self.strategy.BATCH_SIZE,
                             model_weights=self.client_model.state_dict(), classifier_weights=self.classifier_model.state_dict())
@@ -280,6 +295,7 @@ class Server:
 
             print(f'[+] Labeling with client {client_id, self.connected_clients[client_id][0]}')
             self.send_packet(data={'LABEL_EVENT': b''}, client_socket=client_socket)
+            self.server_model.eval()
             with torch.inference_mode():
                 while True:
                     # Ensure client's features are stored on the db
@@ -308,6 +324,11 @@ class Server:
 
 
     def aggregate_global_model(self):
+        """
+        Aggregation process at the end of each global training round. Fetch necessary data and aggregate the global model by the Federated Averaging algorithm.\
+        Returns:
+            A list containing [The Federated Averaged client model, The Federated Averaged client classifier]
+        """
         # Fetch the updated model weights of all trained clients
         query = "SELECT model_updated_weights FROM training WHERE client_id IN (" + ", ".join(str(id) for id in self.trained_clients) + ")"
         all_client_model_weights = self.execute_query(query=query, fetch_data_flag=True, fetch_all_flag=True)
@@ -318,20 +339,31 @@ class Server:
         query = "SELECT data_size FROM training WHERE client_id IN (" + ", ".join(str(id) for id in self.trained_clients) + ")"
         datasizes = self.execute_query(query=query, fetch_data_flag=True, fetch_all_flag=True)
         datasizes = [int(row[0]) for row in datasizes]
-        #avg_model_weights = self.calculate_weighted_avg(all_client_model_weights)
-        #avg_classifier_weights = self.calculate_weighted_avg(all_client_classifier_weights)
-        return [self.calculate_weighted_avg(all_client_model_weights, datasizes), self.calculate_weighted_avg(all_client_classifier_weights, datasizes)]
+        return [self.federated_averaging(all_client_model_weights, datasizes), self.federated_averaging(all_client_classifier_weights, datasizes)]
 
-    def calculate_weighted_avg(self, fetched_weights: list, fetched_datasizes: list):
+    def federated_averaging(self, fetched_weights: list, fetched_datasizes: list):
+        """
+        Implementation of the federated averaging algotithm.
+        Args:
+            fetched_weights: The model weights of the participating/trained clients
+            fetched_datasizes: The data sizes of the participating/trained clients
+        Returns:
+            avg_weights: The global model by Federated Averaging
+        """
+        # Dictionary for the global (averaged) weights
         avg_weights = {}
+        # Calculate the data size of all the participating clients
         total_data = sum(datasize for datasize in fetched_datasizes)
+        # For each client's updated weights
         for i in range(len(fetched_weights)):
-            weight_dict = pickle.loads(fetched_weights[i][0])
-            for key in weight_dict:
+            client_weight_dict = pickle.loads(fetched_weights[i][0])
+            # For each layer of the model
+            for key in client_weight_dict.keys():
+                # Average the weights and normalize based on client's contribution to total data size
                 if key in avg_weights.keys():
-                    avg_weights[key] += avg_weights[key] * (fetched_datasizes[i] / total_data)
+                    avg_weights[key] += client_weight_dict[key] * (fetched_datasizes[i] / total_data)
                 else:
-                    avg_weights[key] = weight_dict[key] * (fetched_datasizes[i] / total_data)
+                    avg_weights[key] = client_weight_dict[key] * (fetched_datasizes[i] / total_data)
         return avg_weights
 
 if __name__ == '__main__':
@@ -344,27 +376,28 @@ if __name__ == '__main__':
     server.create_socket()
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
-    server.initialize_strategy(config_file='Implementation/strategy_config.txt')
-
+    server.initialize_strategy(config_file_path='Implementation/strategy_config.txt')
+    # Wait for the minimum number of client to connect and label with the server
     while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
         pass
-
+    
     for e in range(server.strategy.GLOBAL_TRAINING_ROUNDS):
+        print(f'[+] Global training round {e + 1} initiated')
+        query = "INSERT INTO epoch_stats (epoch, connected_clients) VALUES (?, ?)"
+        server.execute_query(query=query, values=(e, len(server.connected_clients)))
         #transmit train signal to each client
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
-        #receive updates from min_clients
+        # Wait to receive model updates from the minimum number of clients to aggregate
         while len(server.trained_clients) < server.strategy.MIN_PARTICIPANTS_FIT:
             pass
         #aggregate global model
         aggr_models = server.aggregate_global_model()
-        #save it o db
+        query = "UPDATE epoch_stats SET global_model = ?, global_classifier = ?, trained_clients = ? WHERE epoch = ?"
+        server.execute_query(query=query, values=(pickle.dumps(aggr_models[0]), pickle.dumps(aggr_models[1]), len(server.trained_clients), e))
         #transmit global model
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'AGGR_MODELS': aggr_models}, client_socket=client_socket)
+        print(f'[+] Trasmitted global model to all participants')
         server.trained_clients.clear()
         time.sleep(5)
-
-    
-
-    
