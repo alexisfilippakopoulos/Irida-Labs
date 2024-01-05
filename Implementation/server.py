@@ -77,7 +77,7 @@ class Server:
         self.execute_query(query=epoch_stats_table) if not self.check_table_existence(target_table='epoch_stats') else None
         print('[+] Database schema created/loaded successsfully')
 
-    def check_table_existence(self, target_table: str):
+    def check_table_existence(self, target_table: str) -> bool:
         """
         Checks if a specific table exists within the database.
         Args:
@@ -251,6 +251,7 @@ class Server:
             self.execute_query(query=query, values=(client_id, serialized_model_weights, serialized_classifier_weights, serialized_model_weights, serialized_classifier_weights))
             self.trained_clients.append(client_id)
             print(f"\t[+] Received updated weights of client: {client_id, self.connected_clients[client_id][0]}")
+            print(f"\t[+] Currently trained clients: {len(self.trained_clients)} / {self.strategy.MIN_PARTICIPANTS_FIT}")
         elif header == 'OK':
             self.recvd_initial_weights += 1
         self.event_dict[header].set() if header in self.event_dict.keys() else None
@@ -317,7 +318,7 @@ class Server:
                         break
         # Handle client that disconnected during labeling
         try:
-            print(f'[+] Finished labeling with client {client_id, self.connected_clients[client_id][0]}')
+            print(f'[+] Finished labeling with client {client_id, self.connected_clients[client_id][0]}\n')
             self.labeled_clients.append(client_id)
         except KeyError as error:
             print('[+] Client Disconnected.')
@@ -377,14 +378,15 @@ if __name__ == '__main__':
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
     server.initialize_strategy(config_file_path='Implementation/strategy_config.txt')
-    # Wait for the minimum number of client to connect and label with the server
-    while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
-        pass
     
     for e in range(server.strategy.GLOBAL_TRAINING_ROUNDS):
+        # Wait for the minimum number of client to connect and label with the server
+        while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
+            pass
+
         print(f'[+] Global training round {e + 1} initiated')
-        query = "INSERT INTO epoch_stats (epoch, connected_clients) VALUES (?, ?)"
-        server.execute_query(query=query, values=(e, len(server.connected_clients)))
+        query = "INSERT INTO epoch_stats (epoch, connected_clients) VALUES (?, ?) ON CONFLICT (epoch) DO UPDATE SET connected_clients = ?"
+        server.execute_query(query=query, values=(e, len(server.connected_clients), len(server.connected_clients)))
         #transmit train signal to each client
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
