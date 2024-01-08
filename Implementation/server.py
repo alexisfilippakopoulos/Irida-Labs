@@ -9,6 +9,8 @@ from fl_strategy import FL_Strategy
 from fl_plan import FL_Plan
 from client_models import ClientModel, ClientClassifier
 from server_model import ServerModel
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 import time
 
 
@@ -69,7 +71,8 @@ class Server:
             global_model BLOB,
             global_classifier BLOB,
             connected_clients INT,
-            trained_clients INT
+            trained_clients INT,
+            test_accuracy REAL
         )
         """
         self.execute_query(query=clients_table) if not self.check_table_existence(target_table='clients') else None
@@ -366,6 +369,28 @@ class Server:
                 else:
                     avg_weights[key] = client_weight_dict[key] * (fetched_datasizes[i] / total_data)
         return avg_weights
+    
+    def get_test_data(self):
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, ), (0.5, ), )])
+        test_data = datasets.FashionMNIST(root='Implementation/data/', download=True, train=False, transform=transform)
+        return DataLoader(dataset=test_data, batch_size=self.strategy.BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    
+    def test_global_model(self, test_dl: DataLoader, model_weights: dict, classifier_weights: dict):
+        self.client_model.load_state_dict(model_weights), self.classifier_model.load_state_dict(classifier_weights)
+        self.client_model.to(self.device), self.classifier_model.to(self.device)
+        self.client_model.eval(), self.classifier_model.eval()
+        corr, total = 0, 0
+        with torch.inference_mode():
+            for i, (inputs, labels) in enumerate(test_dl):
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                outputs = self.classifier_model(self.client_model(inputs))
+                _, preds = torch.max(input=outputs, dim=1)
+                corr += (preds == labels).sum().item()
+                total += labels.size(0)
+            del inputs, labels
+        test_acc = (corr * 100 ) / total
+        self.execute_query(query='UPDATE epoch_stats SET test_accuracy = ?', values=(round(test_acc, 2), ))
+        print(f'\t[+] Global model accuracy: {test_acc} %')
 
 if __name__ == '__main__':
 # To execute, server_ip and server_port must be specified from the cl.
@@ -378,6 +403,7 @@ if __name__ == '__main__':
     server.create_db_schema()
     threading.Thread(target=server.listen_for_connections, args=()).start()
     server.initialize_strategy(config_file_path='Implementation/strategy_config.txt')
+    test_dl = server.get_test_data()
     
     for e in range(server.strategy.GLOBAL_TRAINING_ROUNDS):
         # Wait for the minimum number of client to connect and label with the server
@@ -400,6 +426,7 @@ if __name__ == '__main__':
         #transmit global model
         for client_id, (client_address, client_socket) in server.connected_clients.items():
             server.send_packet(data={'AGGR_MODELS': aggr_models}, client_socket=client_socket)
-        print(f'[+] Trasmitted global model to all participants')
+        print(f'\t[+] Trasmitted global model to all participants')
         server.trained_clients.clear()
+        threading.Thread(target=server.test_global_model, args=(test_dl, aggr_models[0], aggr_models[1])).start()
         time.sleep(5)
