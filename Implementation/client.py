@@ -139,8 +139,8 @@ class Client:
             train_subset: Training dataset
             test_subset: Testing dataset
         """
-        #shards = {'0': [0, 1, 5, 6], '1': [2, 3, 4, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
-        shards = {'0': [0, 1, 3, 6], '1': [2, 4, 5, 7], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
+        shards = {'0': [0, 1, 5, 6, 9], '1': [2, 3, 4, 7, 8], '2': [0, 1, 5, 7, 8], '3': [2, 3, 4, 6, 9]}
+        #shards = {'0': [0, 1], '1': [2, 3], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         training_indices = []
         testing_indices = []
 
@@ -261,10 +261,10 @@ if __name__ == '__main__':
     print('[+] Custom dataset successfully created')
     print(len(training_data))
     print(len(train_dl))"""
+    print('[+] Waiting for training signal')
+    start_training_event.wait()
+    start_training_event.clear()
     for e in range(client.fl_plan.GLOBAL_TRAINING_ROUNDS):
-        print('[+] Waiting for training signal')
-        start_training_event.wait()
-        start_training_event.clear()
         print(f'[+] Started training for global epoch: {e}')
         avg_train_loss, train_time = client.train_one_epoch(train_dl=train_dl)
         (avg_vloss, val_acc), val_time = client.validate(val_dl=val_dl)

@@ -194,7 +194,7 @@ class Server:
         print(f'[+] Client {client_id, client_address} connected -> Connected clients: {len(self.connected_clients)}')
         #self.send_packet(data={'INITIAL_WEIGHTS': [self.client_model.state_dict(), self.classifier_model.state_dict()]}, client_socket=client_socket)
         self.send_packet(data={'PLAN': self.plan}, client_socket=client_socket)
-        print(f'[+] Transmitted initial weights to client {client_id, client_address}')
+        print(f'[+] Transmitted FL plan to client {client_id, client_address}')
         return client_id
 
     def send_packet(self, data: dict, client_socket: socket.socket):
@@ -375,7 +375,7 @@ class Server:
         test_data = datasets.FashionMNIST(root='Implementation/data/', download=True, train=False, transform=transform)
         return DataLoader(dataset=test_data, batch_size=self.strategy.BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     
-    def test_global_model(self, test_dl: DataLoader, model_weights: dict, classifier_weights: dict):
+    def test_global_model(self, test_dl: DataLoader, model_weights: dict, classifier_weights: dict, e: int):
         self.client_model.load_state_dict(model_weights), self.classifier_model.load_state_dict(classifier_weights)
         self.client_model.to(self.device), self.classifier_model.to(self.device)
         self.client_model.eval(), self.classifier_model.eval()
@@ -389,8 +389,8 @@ class Server:
                 total += labels.size(0)
             del inputs, labels
         test_acc = (corr * 100 ) / total
-        self.execute_query(query='UPDATE epoch_stats SET test_accuracy = ?', values=(round(test_acc, 2), ))
-        print(f'\t[+] Global model accuracy: {test_acc} %')
+        self.execute_query(query='UPDATE epoch_stats SET test_accuracy = ? WHERE epoch = ?', values=(round(test_acc, 2), e - 1))
+        print(f'\t[+] Global model accuracy for epoch {e - 1}: {test_acc} %')
 
 if __name__ == '__main__':
 # To execute, server_ip and server_port must be specified from the cl.
@@ -410,12 +410,17 @@ if __name__ == '__main__':
         while (len(server.connected_clients) < server.strategy.MIN_PARTICIPANTS_START) or (len(server.connected_clients) != len(server.labeled_clients)):
             pass
 
-        print(f'[+] Global training round {e + 1} initiated')
+        if e == 0:
+            #transmit train signal to each client
+            for client_id, (client_address, client_socket) in server.connected_clients.items():
+                server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
+        else:
+            threading.Thread(target=server.test_global_model, args=(test_dl, aggr_models[0], aggr_models[1], e)).start()
+
+        print(f'[+] Global training round {e} initiated')
         query = "INSERT INTO epoch_stats (epoch, connected_clients) VALUES (?, ?) ON CONFLICT (epoch) DO UPDATE SET connected_clients = ?"
         server.execute_query(query=query, values=(e, len(server.connected_clients), len(server.connected_clients)))
-        #transmit train signal to each client
-        for client_id, (client_address, client_socket) in server.connected_clients.items():
-            server.send_packet(data={'TRAIN': b''}, client_socket=client_socket)
+        
         # Wait to receive model updates from the minimum number of clients to aggregate
         while len(server.trained_clients) < server.strategy.MIN_PARTICIPANTS_FIT:
             pass
@@ -428,5 +433,3 @@ if __name__ == '__main__':
             server.send_packet(data={'AGGR_MODELS': aggr_models}, client_socket=client_socket)
         print(f'\t[+] Trasmitted global model to all participants')
         server.trained_clients.clear()
-        threading.Thread(target=server.test_global_model, args=(test_dl, aggr_models[0], aggr_models[1])).start()
-        time.sleep(5)

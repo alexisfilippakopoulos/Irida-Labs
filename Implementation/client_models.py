@@ -20,7 +20,8 @@ class ClientModel(nn.Module):
 class ClientClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(in_features=4*4*256, out_features=10)
+        self.fc1 = nn.Linear(in_features=4*4*256, out_features=512)
+        self.fc2 = nn.Linear(in_features=512, out_features=10)
         
     def forward(self, x):
         x = self.fc1(flatten(x, 1))
