@@ -140,7 +140,6 @@ class Client:
             test_subset: Testing dataset
         """
         shards = {'0': [0, 1, 5, 6, 9], '1': [2, 3, 4, 7, 8], '2': [0, 1, 5, 7, 8], '3': [2, 3, 4, 6, 9]}
-        #shards = {'0': [0, 1], '1': [2, 3], '2': [4, 5], '3': [6, 7], '4': [8, 9]}
         training_indices = []
         testing_indices = []
 
